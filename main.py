@@ -5,7 +5,7 @@ import threading
 from telebot import types
 
 # --- CONFIG ---
-API_TOKEN = 'BOT_TOKEN'  # <--- Apna Token Yahan Dalein
+API_TOKEN = '8623848974:AAEBWQvMrCewfYBmby0QKKMq9M9kVx4AD5U'  # <--- Apna Token Yahan Dalein
 bot = telebot.TeleBot(API_TOKEN)
 
 # --- GLOBAL SETTINGS ---
