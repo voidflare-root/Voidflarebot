@@ -2,10 +2,15 @@ import telebot
 import httpx
 import socket
 import threading
+import os # <--- Railway variables ke liye zaruri hai
 from telebot import types
 
 # --- CONFIG ---
-API_TOKEN = '8623848974:AAEBWQvMrCewfYBmby0QKKMq9M9kVx4AD5U'  # <--- Apna Token Yahan Dalein
+# Agar Railway Variables mein 'Token' naam ka variable hai toh wo use hoga, 
+# nahi toh niche wala hardcoded token use hoga.
+HARDCODED_TOKEN = '8623848974:AAEBWQvMrCewfYBmby0QKKMq9M9kVx4AD5U'
+API_TOKEN = os.getenv('Token', HARDCODED_TOKEN)
+
 bot = telebot.TeleBot(API_TOKEN)
 
 # --- GLOBAL SETTINGS ---
@@ -18,13 +23,13 @@ NON_TUNABLE_IPS = ["23.", "49.", "184."]
 
 def get_ip(domain):
     try:
-        return socket.gethostbyname(domain.strip())
+        domain = domain.strip().replace("http://", "").replace("https://", "").split('/')[0]
+        return socket.gethostbyname(domain)
     except:
         return None
 
 def check_ports(ip):
     open_ports = []
-    # Common Tunneling Ports
     test_ports = [80, 443, 8080, 8888, 2052, 2082, 2086, 2087, 2095, 2096]
     for port in test_ports:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -78,7 +83,6 @@ def more_menu():
 
 # ================= STEP HANDLERS =================
 
-# --- [1] File Scanner ---
 def step_file_scan(message):
     if not message.document:
         bot.send_message(message.chat.id, "❌ Error: Please upload a .txt file.")
@@ -93,18 +97,15 @@ def step_file_scan(message):
         results += f"🌐 `{d.strip()}` | `{code}` | `{server}`\n"
     bot.send_message(message.chat.id, results if results else "No results found.", parse_mode='Markdown')
 
-# --- [2] TCP Scanner ---
 def step_tcp_scan(message):
     host = message.text.strip()
     ip = get_ip(host)
     if not ip:
         bot.send_message(message.chat.id, "❌ Error: Host resolve nahi ho raha.")
         return
-    
     bot.send_message(message.chat.id, f"⚙️ Scanning ports for {host}...")
     ports = check_ports(ip)
     code, server, _ = get_server_info(host)
-    
     res = (f"⚡ *Advanced Scan Result*\n\n"
            f"🌐 *Host:* `{host}`\n"
            f"📍 *IP:* `{ip}`\n"
@@ -113,24 +114,20 @@ def step_tcp_scan(message):
            f"🔌 *Open Ports:* `{', '.join(ports) if ports else 'All Closed'}`")
     bot.send_message(message.chat.id, res, parse_mode='Markdown')
 
-# --- [3] CDN Finder ---
 def step_cdn_finder(message):
     host = message.text.strip()
     _, server, cdn = get_server_info(host)
     bot.send_message(message.chat.id, f"🔍 *CDN Info*\n\n🌐 *Host:* {host}\n📦 *CDN:* `{cdn}`\n🖥 *Server:* `{server}`", parse_mode='Markdown')
 
-# --- [4] Tunable Checker ---
 def step_tunable(message):
     host = message.text.strip()
     ip = get_ip(host)
     if not ip:
         bot.send_message(message.chat.id, "❌ Error: Host resolve nahi ho raha.")
         return
-    
     _, server, cdn = get_server_info(host)
     is_ip_ok = not any(ip.startswith(p) for p in NON_TUNABLE_IPS)
     is_cdn_ok = cdn != "Unknown"
-    
     if is_ip_ok and is_cdn_ok:
         payload = generate_ssh_payload(host, cdn)
         msg = (f"✅ *STATUS: TUNNABLE*\n\n"
@@ -140,70 +137,57 @@ def step_tunable(message):
                f"🚀 *Payload (SSH):*\n`{payload}`")
     else:
         msg = f"❌ *STATUS: NON-TUNNABLE*\n\n🎯 *Host:* {host}\n⚠️ *Reason:* Server ({cdn}) or IP range not supported."
-    
     bot.send_message(message.chat.id, msg, parse_mode='Markdown')
 
-# --- [5] Subdomain Finder ---
 def step_subdomain(message):
     domain = message.text.strip()
     common_subs = ['www', 'mail', 'api', 'dev', 'blog', 'cdn', 'whm', 'cpanel', 'webmail', 'vps']
     bot.send_message(message.chat.id, f"🔎 Searching subdomains for `{domain}`...", parse_mode='Markdown')
-    
     found = []
     for sub in common_subs:
         target = f"{sub}.{domain}"
-        if get_ip(target):
-            found.append(target)
-            
+        if get_ip(target): found.append(target)
     if found:
         bot.send_message(message.chat.id, "✅ *Subdomains Found:*\n\n" + "\n".join(found))
     else:
-        bot.send_message(message.chat.id, "❌ No subdomains found for this domain.")
+        bot.send_message(message.chat.id, "❌ No subdomains found.")
 
 # ================= MAIN ROUTER =================
 
 @bot.message_handler(commands=['start'])
 def start_cmd(message):
-    bot.send_message(message.chat.id, "🔥 *VoidFlare v1.1 Online*\n\nSelect a tool below:", 
+    bot.send_message(message.chat.id, "🔥 *VoidFlare v1.1 Online*\nSelect a tool:", 
                      parse_mode='Markdown', reply_markup=main_menu())
 
 @bot.message_handler(func=lambda m: True)
 def main_router(message):
     choice = message.text
-    
     if choice == '📂 Domain File Scanner':
-        msg = bot.send_message(message.chat.id, "📤 Please upload/send your `.txt` file:")
+        msg = bot.send_message(message.chat.id, "📤 Upload `.txt` file:")
         bot.register_next_step_handler(msg, step_file_scan)
-        
     elif choice == '⚡ TCP/HTTP Scanner':
-        msg = bot.send_message(message.chat.id, "🎯 Enter Host or IP to scan:")
+        msg = bot.send_message(message.chat.id, "🎯 Enter Host:")
         bot.register_next_step_handler(msg, step_tcp_scan)
-        
     elif choice == '🔍 CDN Finder':
-        msg = bot.send_message(message.chat.id, "🌐 Enter Host to find CDN:")
+        msg = bot.send_message(message.chat.id, "🌐 Enter Host:")
         bot.register_next_step_handler(msg, step_cdn_finder)
-        
     elif choice == '🎯 Tunable Checker':
-        msg = bot.send_message(message.chat.id, "🎯 Enter Host to check Tunability:")
+        msg = bot.send_message(message.chat.id, "🎯 Enter Host:")
         bot.register_next_step_handler(msg, step_tunable)
-        
     elif choice == '🌐 Subdomain Finder':
-        msg = bot.send_message(message.chat.id, "🔎 Enter Domain (e.g., google.com):")
+        msg = bot.send_message(message.chat.id, "🔎 Enter Domain:")
         bot.register_next_step_handler(msg, step_subdomain)
-        
     elif choice == '➕ More':
-        bot.send_message(message.chat.id, "🛠 *More Options (Host Mode)*", reply_markup=more_menu(), parse_mode='Markdown')
-        
+        bot.send_message(message.chat.id, "🛠 *More Tools*", reply_markup=more_menu(), parse_mode='Markdown')
     elif choice == '📄 Single Domain Scan':
-        msg = bot.send_message(message.chat.id, "⌨️ Enter Host Name to scan:")
+        msg = bot.send_message(message.chat.id, "⌨️ Enter Host Name:")
         bot.register_next_step_handler(msg, step_tcp_scan)
-        
     elif choice == '🔙 Back to Menu':
-        bot.send_message(message.chat.id, "🔙 Returning...", reply_markup=main_menu())
-        
+        bot.send_message(message.chat.id, "🔙 Back", reply_markup=main_menu())
     elif choice == '❌ Exit':
-        bot.send_message(message.chat.id, "👋 Closed. Send /start to reopen.", reply_markup=types.ReplyKeyboardRemove())
+        bot.send_message(message.chat.id, "👋 Bye!", reply_markup=types.ReplyKeyboardRemove())
 
 # RUN
-print("VoidFlare Bot Fixed Started...")
-bot.infinity_polling()
+if __name__ == "__main__":
+    print("Bot is starting...")
+    bot.infinity_polling()
