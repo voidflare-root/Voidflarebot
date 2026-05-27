@@ -1,193 +1,292 @@
-import telebot
-import httpx
+import os
+import re
 import socket
-import threading
-import os # <--- Railway variables ke liye zaruri hai
+import httpx
+import telebot
+from bs4 import BeautifulSoup
 from telebot import types
 
-# --- CONFIG ---
-# Agar Railway Variables mein 'Token' naam ka variable hai toh wo use hoga, 
-# nahi toh niche wala hardcoded token use hoga.
-HARDCODED_TOKEN = '8623848974:AAEBWQvMrCewfYBmby0QKKMq9M9kVx4AD5U'
-API_TOKEN = os.getenv('Token', HARDCODED_TOKEN)
-
+# ================= CONFIG =================
+API_TOKEN = os.getenv("Token", "PASTE_NEW_BOT_TOKEN_HERE")
 bot = telebot.TeleBot(API_TOKEN)
 
-# --- GLOBAL SETTINGS ---
-TIMEOUT = 5
-HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-TUNABLE_SERVERS = ["Cloudflare", "CloudFront", "Google", "Fastly", "Bunny", "Tengine", "Sucuri", "Gcore", "Imperva", "Tencent"]
-NON_TUNABLE_IPS = ["23.", "49.", "184."]
+TIMEOUT = 12
+RESULTS = {}
 
-# ================= HELPER FUNCTIONS =================
+# ================= MENU =================
+def main_menu():
+    markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
+    markup.add("🌐 Subdomain Finder", "⚡ TCP/HTTP Scanner")
+    markup.add("🔍 CDN Finder", "❌ Exit")
+    return markup
 
-def get_ip(domain):
+# ================= HELPERS =================
+def clean_domain(domain):
+    domain = domain.lower().strip()
+    domain = domain.replace("https://", "").replace("http://", "")
+    domain = domain.split("/")[0].split(":")[0]
+    return domain
+
+def is_valid_domain(domain):
+    return re.match(r"^[a-z0-9.-]+\.[a-z]{2,}$", domain) is not None
+
+def get_ip(host):
     try:
-        domain = domain.strip().replace("http://", "").replace("https://", "").split('/')[0]
-        return socket.gethostbyname(domain)
+        return socket.gethostbyname(host)
     except:
-        return None
-
-def check_ports(ip):
-    open_ports = []
-    test_ports = [80, 443, 8080, 8888, 2052, 2082, 2086, 2087, 2095, 2096]
-    for port in test_ports:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(1.0)
-        if sock.connect_ex((ip, port)) == 0:
-            open_ports.append(str(port))
-        sock.close()
-    return open_ports
+        return "No IP"
 
 def get_server_info(domain):
-    domain = domain.strip().replace("http://", "").replace("https://", "").split('/')[0]
     try:
         with httpx.Client(verify=False, timeout=TIMEOUT) as client:
             r = client.get(f"https://{domain}", follow_redirects=True)
             server = r.headers.get("Server", "Unknown")
-            headers_str = str(r.headers).lower()
-            
-            detected_cdn = "Unknown"
-            for s in TUNABLE_SERVERS:
-                if s.lower() in server.lower() or s.lower() in headers_str:
-                    detected_cdn = s
-                    break
-            return r.status_code, server, detected_cdn
+            return r.status_code, server
     except:
-        return 0, "No Response", "Unknown"
+        return 0, "No Response"
 
-def generate_ssh_payload(domain, cdn):
-    if cdn == "Cloudflare":
-        return f"GET / HTTP/1.1[crlf]Host: {domain}[crlf]Upgrade: websocket[crlf]Connection: Upgrade[crlf][crlf]"
-    elif cdn == "CloudFront":
-        return f"GET / HTTP/1.1[crlf]Host: {domain}[crlf]Connection: Upgrade[crlf]Upgrade: websocket[crlf]X-Amz-Cf-Id: tunnel-req[crlf][crlf]"
-    elif cdn == "Google":
-        return f"CONNECT {domain}:443 HTTP/1.1[crlf]Host: {domain}[crlf]X-Forwarded-For: 8.8.8.8[crlf][crlf]"
-    else:
-        return f"GET / HTTP/1.1[crlf]Host: {domain}[crlf]Proxy-Connection: Keep-Alive[crlf][crlf]"
+# ================= SUBDOMAIN SOURCES =================
+def crtsh(domain):
+    found = set()
+    try:
+        url = f"https://crt.sh/?q=%25.{domain}&output=json"
+        r = httpx.get(url, timeout=TIMEOUT)
+        if r.status_code == 200:
+            for item in r.json():
+                for sub in item.get("name_value", "").split("\n"):
+                    sub = sub.lower().replace("*.", "").strip()
+                    if sub.endswith(domain):
+                        found.add(sub)
+    except:
+        pass
+    return found
 
-# ================= KEYBOARDS =================
+def hackertarget(domain):
+    found = set()
+    try:
+        url = f"https://api.hackertarget.com/hostsearch/?q={domain}"
+        r = httpx.get(url, timeout=TIMEOUT)
+        for line in r.text.splitlines():
+            sub = line.split(",")[0].strip().lower()
+            if sub.endswith(domain):
+                found.add(sub)
+    except:
+        pass
+    return found
 
-def main_menu():
-    markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
-    markup.add('📂 Domain File Scanner', '⚡ TCP/HTTP Scanner')
-    markup.add('🔍 CDN Finder', '🎯 Tunable Checker')
-    markup.add('🌐 Subdomain Finder', '❌ Exit')
-    markup.add('➕ More')
+def rapiddns(domain):
+    found = set()
+    try:
+        url = f"https://rapiddns.io/subdomain/{domain}?full=1"
+        r = httpx.get(url, timeout=TIMEOUT)
+        soup = BeautifulSoup(r.text, "html.parser")
+        text = soup.get_text("\n")
+        pattern = rf"[a-zA-Z0-9._-]+\.{re.escape(domain)}"
+        for sub in re.findall(pattern, text):
+            found.add(sub.lower().replace("*.", "").strip())
+    except:
+        pass
+    return found
+
+def alienvault(domain):
+    found = set()
+    try:
+        url = f"https://otx.alienvault.com/api/v1/indicators/domain/{domain}/passive_dns"
+        r = httpx.get(url, timeout=TIMEOUT)
+        data = r.json()
+        for item in data.get("passive_dns", []):
+            sub = item.get("hostname", "").lower().strip()
+            if sub.endswith(domain):
+                found.add(sub)
+    except:
+        pass
+    return found
+
+def common_bruteforce(domain):
+    words = [
+        "www", "mail", "api", "dev", "test", "beta", "admin", "panel",
+        "cpanel", "webmail", "cdn", "vpn", "ssh", "ftp", "m", "app",
+        "blog", "shop", "store", "support", "help", "login", "portal",
+        "dashboard", "server", "host", "cloud", "static", "assets"
+    ]
+    found = set()
+    for word in words:
+        sub = f"{word}.{domain}"
+        if get_ip(sub) != "No IP":
+            found.add(sub)
+    return found
+
+def find_all_subdomains(domain):
+    all_subs = set()
+
+    sources = [
+        crtsh,
+        hackertarget,
+        rapiddns,
+        alienvault,
+        common_bruteforce
+    ]
+
+    for source in sources:
+        all_subs.update(source(domain))
+
+    final = []
+    for sub in sorted(all_subs):
+        ip = get_ip(sub)
+        final.append((sub, ip))
+
+    return final
+
+# ================= BUTTONS =================
+def result_buttons(domain):
+    markup = types.InlineKeyboardMarkup()
+    markup.add(
+        types.InlineKeyboardButton("👁 View", callback_data=f"view|{domain}"),
+        types.InlineKeyboardButton("⬇️ Download", callback_data=f"download|{domain}")
+    )
     return markup
 
-def more_menu():
-    markup = types.ReplyKeyboardMarkup(row_width=1, resize_keyboard=True)
-    markup.add('📄 Single Domain Scan', '🔙 Back to Menu')
-    return markup
+# ================= SCANNERS =================
+def step_subdomain(message):
+    domain = clean_domain(message.text)
 
-# ================= STEP HANDLERS =================
-
-def step_file_scan(message):
-    if not message.document:
-        bot.send_message(message.chat.id, "❌ Error: Please upload a .txt file.")
+    if not is_valid_domain(domain):
+        bot.send_message(message.chat.id, "❌ Sahi domain bhejo.\nExample: `example.com`", parse_mode="Markdown")
         return
-    file_info = bot.get_file(message.document.file_id)
-    content = bot.download_file(file_info.file_path).decode("utf-8").splitlines()
-    bot.send_message(message.chat.id, f"⏳ Scanning {len(content)} domains... Please wait.")
-    
-    results = ""
-    for d in content[:15]:
-        code, server, _ = get_server_info(d)
-        results += f"🌐 `{d.strip()}` | `{code}` | `{server}`\n"
-    bot.send_message(message.chat.id, results if results else "No results found.", parse_mode='Markdown')
+
+    msg = bot.send_message(
+        message.chat.id,
+        f"🔎 Searching subdomains...\n🌐 `{domain}`",
+        parse_mode="Markdown"
+    )
+
+    results = find_all_subdomains(domain)
+
+    if not results:
+        bot.edit_message_text("❌ No subdomains found.", message.chat.id, msg.message_id)
+        return
+
+    RESULTS[domain] = results
+
+    filename = f"{domain}_subdomains.txt"
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write(f"Domain: {domain}\n")
+        f.write(f"Total Subdomains: {len(results)}\n\n")
+        for sub, ip in results:
+            f.write(f"{sub} | {ip}\n")
+
+    bot.edit_message_text(
+        f"✅ Scan Complete!\n\n"
+        f"🌐 Domain: `{domain}`\n"
+        f"📌 Total Found: `{len(results)}`\n\n"
+        f"Button choose karo:",
+        message.chat.id,
+        msg.message_id,
+        parse_mode="Markdown",
+        reply_markup=result_buttons(domain)
+    )
 
 def step_tcp_scan(message):
-    host = message.text.strip()
+    host = clean_domain(message.text)
     ip = get_ip(host)
-    if not ip:
-        bot.send_message(message.chat.id, "❌ Error: Host resolve nahi ho raha.")
-        return
-    bot.send_message(message.chat.id, f"⚙️ Scanning ports for {host}...")
-    ports = check_ports(ip)
-    code, server, _ = get_server_info(host)
-    res = (f"⚡ *Advanced Scan Result*\n\n"
-           f"🌐 *Host:* `{host}`\n"
-           f"📍 *IP:* `{ip}`\n"
-           f"🚥 *Status:* `{code}`\n"
-           f"🖥 *Server:* `{server}`\n"
-           f"🔌 *Open Ports:* `{', '.join(ports) if ports else 'All Closed'}`")
-    bot.send_message(message.chat.id, res, parse_mode='Markdown')
+    code, server = get_server_info(host)
+
+    res = (
+        f"⚡ *TCP/HTTP Scan*\n\n"
+        f"🌐 Host: `{host}`\n"
+        f"📍 IP: `{ip}`\n"
+        f"🚥 Status: `{code}`\n"
+        f"🖥 Server: `{server}`"
+    )
+    bot.send_message(message.chat.id, res, parse_mode="Markdown")
 
 def step_cdn_finder(message):
-    host = message.text.strip()
-    _, server, cdn = get_server_info(host)
-    bot.send_message(message.chat.id, f"🔍 *CDN Info*\n\n🌐 *Host:* {host}\n📦 *CDN:* `{cdn}`\n🖥 *Server:* `{server}`", parse_mode='Markdown')
+    host = clean_domain(message.text)
+    code, server = get_server_info(host)
 
-def step_tunable(message):
-    host = message.text.strip()
-    ip = get_ip(host)
-    if not ip:
-        bot.send_message(message.chat.id, "❌ Error: Host resolve nahi ho raha.")
+    cdn = "Unknown"
+    text = server.lower()
+
+    for name in ["cloudflare", "cloudfront", "fastly", "google", "bunny", "sucuri", "gcore", "imperva"]:
+        if name in text:
+            cdn = name.title()
+            break
+
+    bot.send_message(
+        message.chat.id,
+        f"🔍 *CDN Info*\n\n🌐 Host: `{host}`\n📦 CDN: `{cdn}`\n🖥 Server: `{server}`",
+        parse_mode="Markdown"
+    )
+
+# ================= CALLBACK =================
+@bot.callback_query_handler(func=lambda call: True)
+def callback(call):
+    try:
+        action, domain = call.data.split("|")
+    except:
         return
-    _, server, cdn = get_server_info(host)
-    is_ip_ok = not any(ip.startswith(p) for p in NON_TUNABLE_IPS)
-    is_cdn_ok = cdn != "Unknown"
-    if is_ip_ok and is_cdn_ok:
-        payload = generate_ssh_payload(host, cdn)
-        msg = (f"✅ *STATUS: TUNNABLE*\n\n"
-               f"🎯 *Host:* `{host}`\n"
-               f"📍 *IP:* `{ip}`\n"
-               f"📦 *CDN:* `{cdn}`\n\n"
-               f"🚀 *Payload (SSH):*\n`{payload}`")
-    else:
-        msg = f"❌ *STATUS: NON-TUNNABLE*\n\n🎯 *Host:* {host}\n⚠️ *Reason:* Server ({cdn}) or IP range not supported."
-    bot.send_message(message.chat.id, msg, parse_mode='Markdown')
 
-def step_subdomain(message):
-    domain = message.text.strip()
-    common_subs = ['www', 'mail', 'api', 'dev', 'blog', 'cdn', 'whm', 'cpanel', 'webmail', 'vps']
-    bot.send_message(message.chat.id, f"🔎 Searching subdomains for `{domain}`...", parse_mode='Markdown')
-    found = []
-    for sub in common_subs:
-        target = f"{sub}.{domain}"
-        if get_ip(target): found.append(target)
-    if found:
-        bot.send_message(message.chat.id, "✅ *Subdomains Found:*\n\n" + "\n".join(found))
-    else:
-        bot.send_message(message.chat.id, "❌ No subdomains found.")
+    if domain not in RESULTS:
+        bot.answer_callback_query(call.id, "Result expired. Scan again.")
+        return
 
-# ================= MAIN ROUTER =================
+    if action == "view":
+        text = f"👁 Subdomains for {domain}\n\n"
+        for sub, ip in RESULTS[domain][:60]:
+            text += f"{sub} | {ip}\n"
 
-@bot.message_handler(commands=['start'])
+        if len(RESULTS[domain]) > 60:
+            text += f"\n...and {len(RESULTS[domain]) - 60} more. Download full file."
+
+        bot.send_message(call.message.chat.id, text[:4000])
+
+    elif action == "download":
+        filename = f"{domain}_subdomains.txt"
+
+        with open(filename, "w", encoding="utf-8") as f:
+            f.write(f"Domain: {domain}\n")
+            f.write(f"Total Subdomains: {len(RESULTS[domain])}\n\n")
+            for sub, ip in RESULTS[domain]:
+                f.write(f"{sub} | {ip}\n")
+
+        with open(filename, "rb") as file:
+            bot.send_document(call.message.chat.id, file, caption="⬇️ Full subdomain result file")
+
+    bot.answer_callback_query(call.id)
+
+# ================= START =================
+@bot.message_handler(commands=["start"])
 def start_cmd(message):
-    bot.send_message(message.chat.id, "🔥 *VoidFlare v1.1 Online*\nSelect a tool:", 
-                     parse_mode='Markdown', reply_markup=main_menu())
+    bot.send_message(
+        message.chat.id,
+        "🔥 *VoidFlare Subdomain Bot Online*\n\nSelect a tool:",
+        parse_mode="Markdown",
+        reply_markup=main_menu()
+    )
 
 @bot.message_handler(func=lambda m: True)
 def main_router(message):
     choice = message.text
-    if choice == '📂 Domain File Scanner':
-        msg = bot.send_message(message.chat.id, "📤 Upload `.txt` file:")
-        bot.register_next_step_handler(msg, step_file_scan)
-    elif choice == '⚡ TCP/HTTP Scanner':
+
+    if choice == "🌐 Subdomain Finder":
+        msg = bot.send_message(message.chat.id, "🔎 Enter Domain:\nExample: `example.com`", parse_mode="Markdown")
+        bot.register_next_step_handler(msg, step_subdomain)
+
+    elif choice == "⚡ TCP/HTTP Scanner":
         msg = bot.send_message(message.chat.id, "🎯 Enter Host:")
         bot.register_next_step_handler(msg, step_tcp_scan)
-    elif choice == '🔍 CDN Finder':
+
+    elif choice == "🔍 CDN Finder":
         msg = bot.send_message(message.chat.id, "🌐 Enter Host:")
         bot.register_next_step_handler(msg, step_cdn_finder)
-    elif choice == '🎯 Tunable Checker':
-        msg = bot.send_message(message.chat.id, "🎯 Enter Host:")
-        bot.register_next_step_handler(msg, step_tunable)
-    elif choice == '🌐 Subdomain Finder':
-        msg = bot.send_message(message.chat.id, "🔎 Enter Domain:")
-        bot.register_next_step_handler(msg, step_subdomain)
-    elif choice == '➕ More':
-        bot.send_message(message.chat.id, "🛠 *More Tools*", reply_markup=more_menu(), parse_mode='Markdown')
-    elif choice == '📄 Single Domain Scan':
-        msg = bot.send_message(message.chat.id, "⌨️ Enter Host Name:")
-        bot.register_next_step_handler(msg, step_tcp_scan)
-    elif choice == '🔙 Back to Menu':
-        bot.send_message(message.chat.id, "🔙 Back", reply_markup=main_menu())
-    elif choice == '❌ Exit':
+
+    elif choice == "❌ Exit":
         bot.send_message(message.chat.id, "👋 Bye!", reply_markup=types.ReplyKeyboardRemove())
 
-# RUN
+    else:
+        bot.send_message(message.chat.id, "Menu se option select karo.", reply_markup=main_menu())
+
+# ================= RUN =================
 if __name__ == "__main__":
     print("Bot is starting...")
-    bot.infinity_polling()
+    bot.infinity_polling(timeout=60, long_polling_timeout=60)
