@@ -1,2 +1,4 @@
 pyTelegramBotAPI
 httpx
+dnspython
+beautifulsoup4
